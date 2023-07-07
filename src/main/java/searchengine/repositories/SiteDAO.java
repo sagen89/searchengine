@@ -1,97 +1,53 @@
 package searchengine.repositories;
 
-import org.hibernate.HibernateException;
-import org.hibernate.Session;
-import org.hibernate.Transaction;
+import org.hibernate.*;
 import org.springframework.stereotype.Repository;
 import searchengine.model.SiteEntity;
 import searchengine.model.StatusType;
 
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 @Repository
-public class SiteDAO extends AbstractHibernateDao{
+public class SiteDAO extends AbstractHibernateDao {
+
     public SiteDAO() {
         super();
         settClass(SiteEntity.class);
     }
 
+    public void saveOrUpdate(SiteEntity siteEntity){
+
+        Consumer<Session> saveOrUpdate = session -> {
+            SiteEntity foundEntity = (SiteEntity) findByParameter(session,
+                    "url", siteEntity.getUrl(),1).get(0);
+
+            if (foundEntity == null) {
+                session.save(siteEntity);
+            } else {
+                siteEntity.setId(foundEntity.getId());
+                session.merge(siteEntity);
+            }
+        };
+        inSessionWithTransaction(saveOrUpdate);
+    }
+
     public boolean containsByStatus(StatusType statusType) {
-        Session session = getSession();
-
-        Transaction tx = null;
-        List result = new ArrayList<>();
-
-        try {
-            tx = session.beginTransaction();
-
-            result = findOneByParameter(session, "status", statusType, 1);
-
-            tx.commit();
-        } catch (HibernateException hex) {
-            if (tx != null) {
-                tx.rollback();
-            } else {
-                hex.printStackTrace();
-            }
-        } finally {
-            session.close();
-        }
-
-        return result.size() > 0 ? true : false;
+        Function<Session, SiteEntity> find = session ->
+                (SiteEntity) findByParameter(session, "status",
+                        statusType, 1)
+                        .get(0);
+        return fromSession(find) != null ? true : false;
     }
 
-    public SiteEntity findSiteByUrl(String name) {
-        Session session = getSession();
-        List result = findOneByParameter(session, "url", name,1);
-        session.close();
-        return result.size() != 0 ? (SiteEntity) result.get(0) : null ;
+    public SiteEntity findSiteByUrl(String url) {
+        Function<Session, SiteEntity> find = session ->
+                findSiteByUrl(session, url);
+        return (SiteEntity) fromSession(find);
     }
 
-    public void updateSiteByTime(SiteEntity siteEntity) {
-        Session session = getSession();
-        Transaction tx = null;
-
-        try {
-            tx = session.beginTransaction();
-            SiteEntity findEntity = session.find(SiteEntity.class, siteEntity.getId());
-            findEntity.setStatusTime(new Date());
-            session.merge(findEntity);
-            tx.commit();
-        } catch (HibernateException hex) {
-            if (tx != null) {
-                tx.rollback();
-            } else {
-                throw new RuntimeException(hex);
-            }
-        } finally {
-            session.close();
-        }
+    public SiteEntity findSiteByUrl(Session session, String url) {
+        return (SiteEntity) findByParameter(session, "url",
+                url,1).get(0);
     }
-
-    public void updateSiteByStatusErrorStatusTime(SiteEntity siteEntity) {
-        Session session = getSession();
-        Transaction tx = null;
-
-        try {
-            tx = session.beginTransaction();
-            SiteEntity findEntity = session.find(SiteEntity.class, siteEntity.getId());
-            findEntity.setStatus(siteEntity.getStatus());
-            findEntity.setLastError(siteEntity.getLastError());
-            findEntity.setStatusTime(siteEntity.getStatusTime());
-            session.merge(findEntity);
-            tx.commit();
-        } catch (HibernateException hex) {
-            if (tx != null) {
-                tx.rollback();
-            } else {
-                throw new RuntimeException(hex);
-            }
-        } finally {
-            session.close();
-        }
-    }
-
 }

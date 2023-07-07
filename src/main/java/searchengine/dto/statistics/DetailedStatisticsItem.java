@@ -11,4 +11,17 @@ public class DetailedStatisticsItem {
     private String error;
     private int pages;
     private int lemmas;
+
+    @Override
+    public String toString() {
+        return "DetailedStatisticsItem{" +
+                "url='" + url + '\'' +
+                ", name='" + name + '\'' +
+                ", status='" + status + '\'' +
+                ", statusTime=" + statusTime +
+                ", error='" + error + '\'' +
+                ", pages=" + pages +
+                ", lemmas=" + lemmas +
+                '}';
+    }
 }

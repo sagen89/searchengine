@@ -2,7 +2,8 @@ server:
   port: 8080
 
 spring:
-
+#  profiles.active: development
+  profiles.active: production
   datasource:
     username: root
     password: 02102015EvaSereda!
@@ -13,16 +14,14 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.MySQLDialect
     hibernate:
-      ddl-auto: create
+      ddl-auto: update
     show-sql: false
-
-
 indexing-settings:
   sites:
-#    - url: https://nukadeti.ru
-#      name: Ну-ка Дети.ру
-#    - url: https://bushe.ru
-#      name: Буше.ру
+    - url: https://nukadeti.ru
+      name: Ну-ка Дети.ру
+    - url: https://bushe.ru
+      name: Буше.ру
 #    - url: https://www.lenta.ru
 #      name: Лента.ру
 #    - url: https://www.skillbox.ru
@@ -30,6 +29,7 @@ indexing-settings:
     - url: https://www.playback.ru
       name: PlayBack.Ru
 jsoup-settings:
- userAgent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36
+# userAgent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36
+ userAgent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36
  referrer: http://www.google.com
  timeOut: 60000 # ms

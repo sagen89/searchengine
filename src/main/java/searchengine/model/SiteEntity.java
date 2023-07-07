@@ -9,8 +9,6 @@ import lombok.Setter;
 import java.util.Date;
 import java.util.Set;
 
-import static jakarta.persistence.CascadeType.ALL;
-
 @Setter
 @Getter
 @Entity
@@ -37,8 +35,10 @@ public class SiteEntity {
     private String name;
 
     @OneToMany(cascade = {CascadeType.REMOVE}, fetch = FetchType.LAZY, mappedBy="siteEntity")
-//    @OneToMany(fetch = FetchType.LAZY, mappedBy="siteEntity")
-    private Set<PageEntity> pageEntityList;
+    private Set<PageEntity> pageEntitySet;
+
+    @OneToMany(cascade = {CascadeType.REMOVE}, fetch = FetchType.LAZY, mappedBy="siteEntity")
+    private Set<LemmaEntity> lemmaEntitySet;
 
     @Override
     public String toString() {

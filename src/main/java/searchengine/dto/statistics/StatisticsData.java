@@ -8,4 +8,12 @@ import java.util.List;
 public class StatisticsData {
     private TotalStatistics total;
     private List<DetailedStatisticsItem> detailed;
+
+    @Override
+    public String toString() {
+        return "StatisticsData{" +
+                "total=" + total +
+                ", detailed=" + detailed +
+                '}';
+    }
 }

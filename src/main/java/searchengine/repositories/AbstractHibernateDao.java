@@ -1,118 +1,170 @@
 package searchengine.repositories;
 
 import jakarta.persistence.EntityManagerFactory;
-import org.hibernate.HibernateException;
-import org.hibernate.Session;
-import org.hibernate.Transaction;
+import jakarta.persistence.FlushModeType;
+import lombok.Setter;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.Marker;
+import org.apache.logging.log4j.MarkerManager;
+import org.hibernate.*;
 import org.springframework.beans.factory.annotation.Autowired;
-
 import org.springframework.stereotype.Repository;
+import searchengine.services.IndexingService;
 
-
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 @Repository
 public abstract class AbstractHibernateDao<T> {
+
     private Class<T> tClass;
     @Autowired
-    EntityManagerFactory entityManagerFactory;
+    @Setter
+    private EntityManagerFactory entityManagerFactory;
 
-    public Session getSession(){
-        return entityManagerFactory
-                .createEntityManager()
-                .unwrap(Session.class);
-    }
+    private final Logger logger = LogManager.
+            getLogger(IndexingService.class);
+    private final Marker historyMarker = MarkerManager.
+            getMarker("history");
+
 
     public void settClass(Class<T> tClass) {
         this.tClass = tClass;
     }
 
-    public void  save(Object object){
-        Session session = getSession();
+    public Session getSession(){
+        return entityManagerFactory.createEntityManager()
+                .unwrap(Session.class);
+    }
 
-        Transaction tx = null;
-
-        try {
-            tx = session.beginTransaction();
-            session.persist(object);
-
-            tx.commit();
-        } catch (HibernateException hex) {
-            if (tx != null) {
-                tx.rollback();
-            } else {
-                throw new RuntimeException(hex);
-            }
-        } finally {
-            session.close();
+    public void inSession(Consumer<Session> action) {
+        try (Session session = getSession()) {
+            session.setFlushMode(FlushModeType.COMMIT);
+            action.accept(session);
         }
     }
 
-    public T findOneById(int id){
-        return getSession().find(tClass,id);
+    public void inSessionWithTransaction(Consumer<Session> action) {
+        inSession(
+                session -> {
+                    Transaction tx = session.getTransaction();
+                    try {
+                        tx.begin();
+
+                        action.accept(session);
+
+                        tx.commit();
+                    } catch (HibernateException hex) {
+                        if (tx != null) {
+                            tx.rollback();
+                        } else {
+                            logger.info(historyMarker,
+                                    "при транзакции возникал оибка: {}",
+                                    hex.getMessage());
+                            throw new RuntimeException(hex);
+                        }
+                    } finally {
+                        session.close();
+                    }
+                }
+        );
     }
 
-    protected List findOneByParameter(Session session, String field, T parameter, int limit){
-        List result = session
-                .createQuery("from " +  tClass.getSimpleName() +
+    public <T> T fromSession(Function<Session,T> action) {
+        try (Session session = getSession()) {
+            session.setFlushMode(FlushModeType.COMMIT);
+            return action.apply(session);
+        }
+    }
+
+    public <T> T fromSessionWithTransaction(Function<Session,T> action) {
+        return fromSession(
+                session -> {
+                    T result = null;
+                    Transaction tx = session.getTransaction();
+                    try {
+                        tx.begin();
+
+                        result = action.apply( session );
+
+                        tx.commit();
+                    } catch (HibernateException hex) {
+                        if (tx != null) {
+                            tx.rollback();
+                        } else {
+                            throw new RuntimeException(hex);
+                        }
+                    } finally {
+                        session.close();
+                    }
+                    return result;
+                }
+        );
+    }
+
+    public List<T> getEntities(Session session) {
+        return session
+                .createSelectionQuery("from " +  tClass.getSimpleName(),
+                        tClass).getResultList();
+    }
+
+
+    public T findOneById(int id){
+        Function<Session, T> find = session -> session.get(tClass, id);
+        return fromSession(find);
+    }
+
+    protected List<T> findByParameter(Session session, String field,
+                                      T parameter, int limit) {
+
+        List<T> result = session
+                .createSelectionQuery("from " +  tClass.getSimpleName() +
                         " where " +  field + " = :parameter", tClass)
                 .setParameter("parameter", parameter)
                 .setMaxResults(limit)
                 .list();
         if (result.size() == 0) {
-            return new ArrayList<>();
+            return new ArrayList<T>(1){{add(null);}};
         }
         return result;
     }
+    public T findOneByTwoParameters(Session session, String field1, T parameter1,
+                                    String field2, T parameter2){
 
-    protected T findOneByTwoParameters(Session session, String field1, T parameter1,
-                                       String field2, T parameter2){
-        List result = session
-                .createQuery("from " +  tClass.getSimpleName() +
+        List result = findByTwoParameters(session, field1, parameter1,
+                field2, parameter2, 1);
+        return result.size() == 0 ? null : (T) result.get(0);
+    }
+
+    protected List<T> findByTwoParameters(Session session, String field1, T parameter1,
+                                          String field2, T parameter2, int limit){
+
+        List<T> result = session
+                .createSelectionQuery("from " +  tClass.getSimpleName() +
                         " where " +  field1 + " = :parameter1" +
                         " and " +  field2 + " = :parameter2", tClass)
                 .setParameter("parameter1", parameter1)
                 .setParameter("parameter2", parameter2)
-                .setMaxResults(1)
+                .setMaxResults(limit)
                 .list();
-        if (result.size() == 0) {
-            return null;
-        }
-
-        return (T) result.get(0);
+        return result.size() == 0 ? new ArrayList<>(){{add(null);}} : result;
     }
 
-    public void  deleteById(int id){
-        Session session = getSession();
+    public void delete(T entity){
+        Consumer<Session> delete = session -> delete(session, entity);
+        inSessionWithTransaction(delete);
+    }
 
-        Transaction tx = null;
 
-        try {
-            tx = session.beginTransaction();
-
-//                Object findEntity = session.find(tClass, id);
-//                Object mergedEntity = session.merge(findEntity);
-
-//                session.remove(mergedEntity);
-//            session.detach(session.find(tClass, id));
-                session.remove(session.find(tClass, id));
-                tx.commit();
-
-        } catch (HibernateException hex) {
-            if (tx != null) {
-                tx.rollback();
-            } else {
-                throw new RuntimeException(hex);
-            }
-        } finally {
-            session.close();
-        }
+    public void delete(Session session,T entity){
+        session.remove(session.merge(entity));
     }
 
     protected void deleteByParameter(Session session, String field, T parameter){
         session.createQuery("delete from " +  tClass.getSimpleName() +
-                " where " +  field + " = :parameter")
+                        " where " +  field + " = :parameter")
                 .setParameter("parameter", parameter).executeUpdate();
     }
 

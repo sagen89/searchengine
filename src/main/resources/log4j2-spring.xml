@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration status="WARN">
+    <springProfile name="development">
+        <appenders>
+            <Console name="сonsole" target="SYSTEM_OUT">
+                <PatternLayout>
+                    <Pattern>%d{dd.MM.yyyy HH:mm:ss} %-5level %c{-1} - %m%n</Pattern>
+                </PatternLayout>
+            </Console>
+        </appenders>
+
+        <loggers>
+            <root level="info">
+                <AppenderRef ref="сonsole"/>
+            </root>
+        </loggers>
+    </springProfile>
+
+    <springProfile name="production">
+        <appenders>
+            <File name="history" fileName="logs/history.log">
+                <PatternLayout>
+                    <pattern>%d{dd.MM.yyyy HH:mm:ss} %-5level %c{-1} - %m%n</pattern>
+                </PatternLayout>
+                <Filters>
+                    <MarkerFilter marker="history"/>
+                </Filters>
+            </File>
+            <File name="error" fileName="logs/error.log">
+                <PatternLayout>
+                    <pattern>%d{dd.MM.yyyy HH:mm:ss} %-5level %c{-1} - %m%n</pattern>
+                </PatternLayout>
+            </File>
+        </appenders>
+
+        <loggers>
+            <root level="info">
+                <appender-ref ref="history" level="info"/>
+                <appender-ref ref="error" level="error"/>
+            </root>
+        </loggers>
+    </springProfile>
+</configuration>

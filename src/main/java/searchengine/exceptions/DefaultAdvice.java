@@ -9,20 +9,32 @@ import searchengine.dto.indexing.ErrorResponse;
 @ControllerAdvice
 public class DefaultAdvice {
 
-    @ExceptionHandler(StartIsNotPossible.class)
-    public ResponseEntity<ErrorResponse> handleException(StartIsNotPossible ex) {
+    @ExceptionHandler(StartIndexingIsNotPossible.class)
+    public ResponseEntity<ErrorResponse> handleException(StartIndexingIsNotPossible ex) {
         ErrorResponse response = new ErrorResponse(ex.getMessage());
         return new ResponseEntity<>(response, HttpStatus.TOO_MANY_REQUESTS);
     }
 
-    @ExceptionHandler(StopIsNotPossible.class)
-    public ResponseEntity<ErrorResponse> handleException(StopIsNotPossible ex) {
+    @ExceptionHandler(StopIndexingIsNotPossible.class)
+    public ResponseEntity<ErrorResponse> handleException(StopIndexingIsNotPossible ex) {
         ErrorResponse response = new ErrorResponse(ex.getMessage());
         return new ResponseEntity<>(response, HttpStatus.TOO_MANY_REQUESTS);
     }
 
     @ExceptionHandler(IndexPageIsNotPossible.class)
     public ResponseEntity<ErrorResponse> handleException(IndexPageIsNotPossible ex) {
+        ErrorResponse response = new ErrorResponse(ex.getMessage());
+        return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+    }
+
+    @ExceptionHandler(QueryIsEmpty.class)
+    public ResponseEntity<ErrorResponse> handleException(QueryIsEmpty ex) {
+        ErrorResponse response = new ErrorResponse(ex.getMessage());
+        return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
+    }
+
+    @ExceptionHandler(QueryFormatIsWrong.class)
+    public ResponseEntity<ErrorResponse> handleException(QueryFormatIsWrong ex) {
         ErrorResponse response = new ErrorResponse(ex.getMessage());
         return new ResponseEntity<>(response, HttpStatus.BAD_REQUEST);
     }

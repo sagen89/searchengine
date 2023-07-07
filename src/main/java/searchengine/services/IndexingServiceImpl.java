@@ -2,50 +2,64 @@ package searchengine.services;
 
 
 import lombok.RequiredArgsConstructor;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.Marker;
+import org.apache.logging.log4j.MarkerManager;
+import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
-import searchengine.config.JsoupSession;
 import searchengine.config.Site;
 import searchengine.config.SitesList;
 import searchengine.dto.indexing.IndexPageResponse;
 import searchengine.dto.indexing.StartIndexingResponse;
 import searchengine.dto.indexing.StopIndexingResponse;
 import searchengine.exceptions.IndexPageIsNotPossible;
-import searchengine.exceptions.StartIsNotPossible;
-import searchengine.exceptions.StopIsNotPossible;
+import searchengine.exceptions.StartIndexingIsNotPossible;
+import searchengine.exceptions.StopIndexingIsNotPossible;
 
 import searchengine.model.SiteEntity;
 import searchengine.model.StatusType;
-import searchengine.repositories.PageDAO;
 import searchengine.repositories.SiteDAO;
 
-import java.util.Date;
-import java.util.HashMap;
+import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
-public class IndexingServiceImpl implements IndexingService {
+public class IndexingServiceImpl implements IndexingService{
+
+    private final Logger logger = LogManager.
+            getLogger(IndexingService.class);
+    private final Marker historyMarker = MarkerManager.
+            getMarker("history");
     private final SitesList sites;
     private final SiteDAO siteDAO;
-    private final PageDAO pageDAO;
-    private final JsoupSession jsoupSession;
-    private ForkJoinPool startPool;
+    private final ApplicationContext context;
+
+    private ForkJoinPool pool;
+    private ExecutorService executorService;
+    private boolean indexingStopped;
 
     @Override
     public StartIndexingResponse startIndexing() {
+        logger.info(historyMarker,
+                "запуск полной индексации: {}",
+                sites);
 
-        if (siteDAO.containsByStatus(StatusType.INDEXING)) {
-            throw new StartIsNotPossible("Индексация уже запущена");
+        if (indexingStarted()) {
+            logger.info(historyMarker,
+                    "запуск полной индексации во время" +
+                            " индексации {}",
+                    sites);
+            throw new StartIndexingIsNotPossible("Индексация уже запущена");
         }
 
-        startPool = new ForkJoinPool();
-
-        System.out.println("pathSearcher start");
-        sites.getSites().forEach(site -> startParsingPagesSite(site, startPool));
-
-
+        createForkJoinPool();
+        sites.getSites().forEach(this::startIndexingPagesSite);
 
         StartIndexingResponse indexingResponse = new StartIndexingResponse();
         indexingResponse.setResult(true);
@@ -54,15 +68,19 @@ public class IndexingServiceImpl implements IndexingService {
 
     @Override
     public StopIndexingResponse stopIndexing() {
+        logger.info(historyMarker,
+                "запуск полной остановки индексации: {}",
+                sites);
 
-        if (!siteDAO.containsByStatus(StatusType.INDEXING)) {
-            throw new StopIsNotPossible("Индексация не запущена");
+        if (!siteDAO.containsByStatus(StatusType.INDEXING) &&
+                indexingStopped) {
+            logger.info(historyMarker,
+                    "остановка полной индексации при" +
+                            " незапущенной индексации");
+            throw new StopIndexingIsNotPossible("Индексация не запущена");
         }
-        do {
-            startPool.shutdownNow();
-        } while (siteDAO.containsByStatus(StatusType.INDEXING));
 
-        System.out.println("pathSearcher stop");
+        shutdownForkJoinPool();
 
         StopIndexingResponse stopIndexingResponse = new StopIndexingResponse();
         stopIndexingResponse.setResult(true);
@@ -70,99 +88,197 @@ public class IndexingServiceImpl implements IndexingService {
     }
 
     @Override
-    public IndexPageResponse indexPage(String url) {
-        SiteEntity findSite = findSiteByUrl(url);
+    public IndexPageResponse indexPage(String indexURL) {
 
-        if (findSite == null) {
-            throw new IndexPageIsNotPossible("Данная страница находится за пределами сайтов," +
-                    "указанных в конфигурационном файле");
+        if (indexingStarted()) {
+            logger.info(historyMarker,
+                    "запуск индексации страницы {} во время индексации",
+                    indexURL);
+            throw new StartIndexingIsNotPossible("Индексация уже запущена");
         }
 
-        ForkJoinPool indexPool = new ForkJoinPool();
+        logger.info(historyMarker,"запуск индексации страницы: {}",
+                indexURL);
+        
+        HashMap<String, String> homeAndPathURL =
+                splitIndexUrl(indexURL.trim());
 
-        startParsingPageSite(url, findSite, indexPool);
+        Site foundSite = findSiteEntity(homeAndPathURL);
 
-        IndexPageResponse indexPageResponse = new IndexPageResponse();
-        indexPageResponse.setResult(true);
-        return indexPageResponse;
+        SiteEntity siteEntity = saveOrUpdateSiteInDataBase(foundSite,
+                StatusType.INDEXING);
+
+        createForkJoinPool();
+        startIndexingPageSite(siteEntity,
+                homeAndPathURL.get(siteEntity.getUrl()));
+
+        return getIndexPageResponse(siteEntity);
     }
 
-    private void startParsingPagesSite(Site site, ForkJoinPool pool) {
+    private boolean indexingStarted() {
+        return siteDAO.containsByStatus(StatusType.INDEXING);
+    }
 
-        SiteEntity findSiteEntity = siteDAO
-                .findSiteByUrl(site.getUrl());
-        if (findSiteEntity != null) {
-            siteDAO.deleteById(findSiteEntity.getId());
+    private void createForkJoinPool() {
+        if (pool == null || pool.isShutdown()){
+            pool = new ForkJoinPool();
+        }
+    }
+
+    private void startIndexingPagesSite(Site site) {
+        SiteEntity foundSiteEntity = siteDAO.
+                findSiteByUrl(site.getUrl());
+
+        if (foundSiteEntity != null) {
+            siteDAO.delete(foundSiteEntity);
         }
 
-        SiteEntity siteEntity = new SiteEntity();
-        siteEntity.setName(site.getName());
-        siteEntity.setUrl(site.getUrl());
-        siteEntity.setStatus(StatusType.INDEXING);
-        siteEntity.setStatusTime(new Date());
-        siteDAO.save(siteEntity);
+        SiteEntity siteEntity = saveOrUpdateSiteInDataBase(site,StatusType.INDEXING);
 
-        PathSearcher pathSearcher = createPathSearcher("/", siteEntity,
-                PathSearcher.TypeOfParsing.PAGES);
+        PathSearcher pathSearcher = new PathSearcher(siteEntity,"/", context);
         pool.execute(pathSearcher);
 
-        updateSiteAfterIndexing(siteEntity, pathSearcher , startPool);
+        updateSiteAfterIndexing(siteEntity, pathSearcher);
     }
 
-    private PathSearcher createPathSearcher(String starPath, SiteEntity siteEntity,
-                                            PathSearcher.TypeOfParsing type) {
+    private SiteEntity saveOrUpdateSiteInDataBase(Site site, StatusType status) {
+        SiteEntity siteEntity = new SiteEntity();
 
-        HashMap<String, Object> pathSearcherData = new HashMap<>(){{
-            put(SiteEntity.class.getSimpleName(), siteEntity);
-            put(PageDAO.class.getSimpleName(), pageDAO);
-            put(SiteDAO.class.getSimpleName(), siteDAO);
-            put(JsoupSession.class.getSimpleName(), jsoupSession);
-        }};
+        siteEntity.setName(site.getName());
+        siteEntity.setUrl(site.getUrl());
+        siteEntity.setStatus(status);
+        siteEntity.setStatusTime(new Date());
 
-        return new PathSearcher(starPath,
-                pathSearcherData, type);
+        siteDAO.saveOrUpdate(siteEntity);
+        return  siteEntity;
     }
 
     private void updateSiteAfterIndexing(SiteEntity siteEntity,
-                                         PathSearcher pathSearcher, ForkJoinPool pool) {
-        new Thread(() -> {
+                                         PathSearcher pathSearcher) {
+        createExecutorService();
+        executorService.execute(() -> {
             do {
-
+                try {
+                    Thread.sleep(2000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
             } while (!pathSearcher.isDone() && !pool.isTerminated());
             if (pool.isShutdown()) {
-                updateSite(siteEntity, StatusType.FAILED, "Индексация остановлена пользователем");
+                updateSiteEntity(siteEntity, StatusType.FAILED,
+                        "Индексация остановлена пользователем");
+                logger.info(historyMarker,
+                        "индексация {} остановлена пользователем",
+                        siteEntity.getUrl());
             }
-            if (!pool.isShutdown() && pathSearcher.getException() != null) {
-                updateSite(siteEntity, StatusType.FAILED, pathSearcher.getException().toString());
+            if (!pool.isShutdown() && (pathSearcher.getException() != null ||
+                    siteEntity.getLastError() != null)) {
+                String error = pathSearcher.getException() != null ?
+                        pathSearcher.getException().getMessage().
+                                concat(siteEntity.getLastError().isEmpty() ?
+                                        "" : "; ").
+                                concat(siteEntity.getLastError()) :
+                        siteEntity.getLastError();
+                updateSiteEntity(siteEntity, StatusType.FAILED, error);
+                logger.info(historyMarker,
+                        "при индексации {} возникли ошибки: {}",
+                        siteEntity.getUrl(), siteEntity.getLastError());
             }
-            if (!pool.isShutdown() && pathSearcher.getException() == null) {
-                updateSite(siteEntity, StatusType.INDEXED, null);
+            if (!pool.isShutdown() && pathSearcher.getException() == null &&
+            siteEntity.getLastError() == null) {
+                updateSiteEntity(siteEntity, StatusType.INDEXED, null);
+                logger.info(historyMarker,
+                        "индексация {} заврешена",
+                        siteEntity.getUrl().
+                                concat(!pathSearcher.getIndexingOfAllPages() ?
+                                        pathSearcher.getPath() : ""));
             }
-        }).start();
-    }
-    private void updateSite(SiteEntity entity,StatusType status, String lastError) {
-        entity.setLastError(lastError);
-        entity.setStatus(status);
-        entity.setStatusTime(new Date());
-        siteDAO.updateSiteByStatusErrorStatusTime(entity);
+            if (!siteDAO.containsByStatus(StatusType.INDEXING)) {
+                shutdownForkJoinPool();
+                executorService.shutdown();
+            }
+        });
     }
 
-    private SiteEntity findSiteByUrl(String url){
+    private void createExecutorService() {
+        if (executorService == null || executorService.isShutdown()){
+            executorService = Executors.
+                    newFixedThreadPool(sites.getSites().size());
+        }
+    }
+
+    private void updateSiteEntity(SiteEntity siteEntity, StatusType status,
+                                  String lastError) {
+        siteEntity.setLastError(lastError);
+        siteEntity.setStatus(status);
+        siteEntity.setStatusTime(new Date());
+        siteDAO.saveOrUpdate(siteEntity);
+    }
+
+    private void shutdownForkJoinPool() {
+        indexingStopped = false;
+        do {
+            pool.shutdownNow();
+        } while (siteDAO.containsByStatus(StatusType.INDEXING));
+        indexingStopped = true;
+    }
+
+    private HashMap<String, String> splitIndexUrl(String indexURL) {
         String regexHomeUrl = "https?://[^,\\s/]+";
         Pattern pattern = Pattern.compile(regexHomeUrl);
-        Matcher matcher = pattern.matcher(url);
+        Matcher matcher = pattern.matcher(indexURL);
         String regexUrl = "https?://[^,\\s]+";
-        return matcher.find() && url.matches(regexUrl) ?
-                siteDAO.findSiteByUrl(matcher.group()) : null;
+
+        if (!(matcher.find() && indexURL.matches(regexUrl))) {
+            return new HashMap<>(0);
+        }
+
+        String homeURL = matcher.group();
+        String path = indexURL.replaceAll(homeURL,"");
+        return new HashMap<>(1){{put(homeURL,
+                (path.isEmpty() ? "/" : path));}};
     }
 
-    private void startParsingPageSite(String url, SiteEntity site, ForkJoinPool pool) {
-        String path = url.replaceAll(site.getUrl(),"");
+    private Site findSiteEntity(HashMap<String, String> homeAndPathURL) {
+        Site foundSite;
+        try {
+            foundSite = sites.getSites().stream().
+                    filter(site -> (homeAndPathURL.containsKey(site.getUrl())))
+                    .findFirst().get();
+        } catch (NoSuchElementException ex) {
+                logger.info(historyMarker,
+                        "запуск индексации страницы {} " +
+                                "находящейся за пределами сайтов," +
+                                "указанных в конфигурационном файле",
+                        (homeAndPathURL.keySet().stream().findFirst().toString()).
+                                concat(homeAndPathURL.values().stream().findFirst().
+                                        toString()));
+            throw new IndexPageIsNotPossible("Данная страница находится за " +
+                    "пределами сайтов, указанных в конфигурационном файле");
+        }
+        return foundSite;
+    }
 
-        PathSearcher pathSearcher = createPathSearcher(path,
-                site, PathSearcher.TypeOfParsing.PAGE);
-
+    private void startIndexingPageSite(SiteEntity site, String path) {
+        PathSearcher pathSearcher = new PathSearcher(site, path, context);
+        pathSearcher.setIndexingOfAllPages(false);
         pool.execute(pathSearcher);
-
+        updateSiteAfterIndexing(site, pathSearcher);
     }
+
+    private IndexPageResponse getIndexPageResponse(SiteEntity siteEntity) {
+        do {
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        } while ((((SiteEntity)siteDAO.findOneById(siteEntity.getId())).getStatus()
+                == StatusType.INDEXING));
+
+        IndexPageResponse indexPageResponse = new IndexPageResponse();
+        indexPageResponse.setResult(siteEntity.getLastError() == null);
+        return indexPageResponse;
+    }
+
 }
