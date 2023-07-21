@@ -32,8 +32,7 @@ public class ApiController {
     }
 
     @PostMapping("/indexPage")
-    public ResponseEntity<IndexPageResponse> indexPage(
-            @RequestParam String url) {
+    public ResponseEntity<IndexPageResponse> indexPage(@RequestParam String url) {
         return ResponseEntity.ok(indexingService.indexPage(url));
     }
 
@@ -41,6 +40,7 @@ public class ApiController {
     public ResponseEntity<SearchResponse> search(
             @RequestParam String query, Integer offset,
             Integer limit, String site) {
+
         return ResponseEntity.ok(statisticsService.
                 getSearchResults(query, offset, limit, site));
     }

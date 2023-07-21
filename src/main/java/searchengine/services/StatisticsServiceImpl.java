@@ -22,6 +22,7 @@ import searchengine.model.*;
 import searchengine.repositories.LemmaDAO;
 import searchengine.repositories.SiteDAO;
 
+import java.text.DecimalFormat;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.regex.Matcher;
@@ -32,8 +33,16 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class StatisticsServiceImpl implements StatisticsService {
 
-    private final Logger logger = LogManager.getLogger(IndexingService.class);
-    private final Marker historyMarker = MarkerManager.getMarker("history");
+    private final Logger logger = LogManager.getLogger(StatisticsService.class);
+    private final Marker historyMarker =
+            MarkerManager.getMarker("history");
+    public final static String[] ERRORS = {
+            "Ошибка индексации: главная страница сайта не доступна",
+            "Ошибка индексации: сайт не доступен",
+            "Индексация остановлена пользователем",
+            ""
+    };
+    private final int limitOnFoundPages = 50; //%
     private final int lengthLine = 110;
     private final int countLine = 3;
 
@@ -43,21 +52,13 @@ public class StatisticsServiceImpl implements StatisticsService {
 
     @Override
     public StatisticsResponse getStatistics() {
-        String[] errors = {
-                "Ошибка индексации: главная страница сайта не доступна",
-                "Ошибка индексации: сайт не доступен",
-                ""
-        };
 
         logger.info(historyMarker, "запрос на получение статистики");
 
         Session session = siteDAO.getSession();
-
-        List<SiteEntity> siteEntities =
-                 siteDAO.getEntities(session);
-
+        List<SiteEntity> siteEntities = siteDAO.getEntities(session);
         List<DetailedStatisticsItem> items =
-                getDetailedStatistics(siteEntities, errors);
+                getDetailedStatistics(siteEntities);
         TotalStatistics total = getTotalStatistics(siteEntities, items);
 
         StatisticsData data = new StatisticsData();
@@ -77,7 +78,8 @@ public class StatisticsServiceImpl implements StatisticsService {
 
         logger.info(historyMarker,
                 "запрос на получение данных по поисковому запросу \"{}".
-                        concat(StringUtils.isEmpty(site) ? "\"" : "\" на сайте {}"),
+                        concat(StringUtils.isEmpty(site) ?
+                                "\"" : "\" на сайте {}"),
                 query, site);
 
         if (StringUtils.isEmpty(query)) {
@@ -90,32 +92,26 @@ public class StatisticsServiceImpl implements StatisticsService {
         Session session = lemmaDAO.getSession();
         List<LemmaEntity> lemmaEntitiesOnQuery =
                 getLemmaEntities(query, site, session);
-        Map<PageEntity, List<IndexEntity>> pageAndIndexesMapOnQueryLemmas =
+        Map<PageEntity, List<IndexEntity>> pageEntitiesAndIndexEntitiesOnQueryLemmas =
                 getPageAndIndexes(lemmaEntitiesOnQuery);
+        List<SearchData> searchDataList =
+                getSearchData(pageEntitiesAndIndexEntitiesOnQueryLemmas, site, session);
         session.close();
-
-        List<SearchData> dataList = getSearchData(pageAndIndexesMapOnQueryLemmas);
 
         SearchResponse searchResponse = new SearchResponse();
         searchResponse.setResult(true);
-        searchResponse.setCount(dataList.size());
-
-        searchResponse.setData(dataList.stream()
-                .skip(offset).limit(limit).collect(Collectors.toList())
-        );
+        searchResponse.setCount(searchDataList.size());
+        searchResponse.setData(searchDataList.stream().
+                skip(offset).limit(limit).collect(Collectors.toList()));
 
         return searchResponse;
     }
 
     private List<DetailedStatisticsItem> getDetailedStatistics(
-            List<SiteEntity> siteEntities, String[] errors) {
+            List<SiteEntity> siteEntities) {
+
         return siteEntities.stream().map(siteEntity -> {
-            String errorText = (siteEntity.getLastError() != null &&
-                    siteEntity.getPageEntitySet().size() > 1) ?
-                    errors[1] : errors[0];
-
             DetailedStatisticsItem item = new DetailedStatisticsItem();
-
             item.setUrl(siteEntity.getUrl());
             item.setName(siteEntity.getName());
             item.setStatus(siteEntity.getStatus().toString());
@@ -123,7 +119,7 @@ public class StatisticsServiceImpl implements StatisticsService {
             item.setPages(siteEntity.getPageEntitySet().size());
             item.setLemmas(siteEntity.getLemmaEntitySet().size());
             item.setError(siteEntity.getLastError() == null ?
-                    errors[2] : errorText);
+                    ERRORS[3] : siteEntity.getLastError());
             return item;
         }).collect(Collectors.toList());
     }
@@ -133,7 +129,6 @@ public class StatisticsServiceImpl implements StatisticsService {
             List<DetailedStatisticsItem> items) {
 
         TotalStatistics total = new TotalStatistics();
-
         total.setSites(siteEntities.size());
         total.setPages(items.stream().
                 mapToInt(DetailedStatisticsItem::getPages).sum());
@@ -144,8 +139,8 @@ public class StatisticsServiceImpl implements StatisticsService {
     }
 
     private List<LemmaEntity> getLemmaEntities(
-            String text, String siteUrl, Session session) {
-        return lemmaFinder.getUniqueWords(text).
+            String query, String siteUrl, Session session) {
+        return lemmaFinder.getUniqueWords(query).
                 stream().map(lemmaFinder::getNormalForms).
                 filter(normalForms -> normalForms.size() != 0).
                 flatMap(normalForms ->
@@ -166,15 +161,15 @@ public class StatisticsServiceImpl implements StatisticsService {
             return map;
         }
 
-        int numberOfDistinctLemmas = (int) lemmaEntities.stream().
+        int amountDistinctLemmas = (int) lemmaEntities.stream().
                 map(LemmaEntity::getLemma).distinct().count();
 
         lemmaEntities.stream().
                 flatMap(lemmaEntity -> lemmaEntity.getIndexEntities().stream()).
                 collect(Collectors.groupingBy(IndexEntity::getPageEntity)).
-                forEach((k, v) -> {
-                    if (v.size() >= numberOfDistinctLemmas) {
-                        map.put(k, v);
+                forEach((pageEntity, indexEntities) -> {
+                    if (indexEntities.size() >= amountDistinctLemmas) {
+                        map.put(pageEntity, indexEntities);
                     }
                 });
 
@@ -182,42 +177,80 @@ public class StatisticsServiceImpl implements StatisticsService {
     }
 
     private List<SearchData> getSearchData(
-            Map<PageEntity, List<IndexEntity>> pageAndIndexesMapOnQueryLemmas) {
+            Map<PageEntity, List<IndexEntity>> pageEntitiesAndIndexEntitiesOnQueryLemmas,
+            String site, Session session) {
 
-        if (pageAndIndexesMapOnQueryLemmas.size() == 0) {
+        if (pageEntitiesAndIndexEntitiesOnQueryLemmas.size() == 0) {
             return Collections.emptyList();
         }
 
-        int maxAbsoluteRelevance =
-                pageAndIndexesMapOnQueryLemmas.values().stream()
-                .mapToInt(indexEntities -> indexEntities.stream().parallel()
-                        .mapToInt(IndexEntity::getRank).sum()).sequential()
-                .max().getAsInt();
+        int sizeOfPageEntityList = pageEntitiesAndIndexEntitiesOnQueryLemmas.keySet().size();
+        float percentage = getPercentageOfFoundPages(sizeOfPageEntityList, site, session);
+
+        if (percentage > limitOnFoundPages) {
+            return getSearchDataWhenLimitIsOver(sizeOfPageEntityList, percentage);
+        }
 
         ExecutorService executor = Executors.newCachedThreadPool();
         List<Future<SearchData>>  futureList =
                 submitTaskToCreateSearchData(executor,
-                        pageAndIndexesMapOnQueryLemmas, maxAbsoluteRelevance);
+                        pageEntitiesAndIndexEntitiesOnQueryLemmas,
+                        getMaxAbsoluteRelevance(pageEntitiesAndIndexEntitiesOnQueryLemmas));
         List<SearchData> data = futureList.stream().map(future -> {
             try {
                 return future.get();
             } catch (InterruptedException | ExecutionException e) {
-                throw new RuntimeException(e);
+                e.printStackTrace();
             }
-        }).sorted().collect(Collectors.toList());
+            return null;
+        }).filter(Objects::nonNull).sorted().collect(Collectors.toList());
         executor.shutdown();
 
         return data;
     }
 
+    private float getPercentageOfFoundPages(int sizeOfPageEntityList, String site,
+                                            Session session) {
+
+        int amountAllPages =
+                siteDAO.getEntities(session).stream().filter(s -> site == null ||
+                                ((SiteEntity) s).getUrl().equals(site)).
+                        mapToInt(s -> ((SiteEntity) s).getPageEntitySet().size()).
+                        sum();
+
+        return (float) sizeOfPageEntityList / amountAllPages * 100;
+    }
+
+    private List<SearchData> getSearchDataWhenLimitIsOver(
+            int sizeOfPageEntityList, float percentage) {
+
+        SearchData searchData = new SearchData();
+        searchData.setSiteName("");
+        searchData.setTitle("");
+        searchData.setSnippet("Результаты поиска присутствуют на <b> ".
+                concat((new DecimalFormat("##.##")).format(percentage)).
+                concat(" %</b> страниц "));
+        return new ArrayList<>(sizeOfPageEntityList){{add(searchData);
+            addAll(Arrays.asList(new SearchData [sizeOfPageEntityList - 1]));}};
+    }
+
+    private int getMaxAbsoluteRelevance(
+            Map<PageEntity, List<IndexEntity>> pageEntitiesAndIndexEntitiesOnQueryLemmas) {
+
+        return pageEntitiesAndIndexEntitiesOnQueryLemmas.values().stream()
+                .mapToInt(indexEntities -> indexEntities.stream().parallel()
+                        .mapToInt(IndexEntity::getRank).sum()).sequential()
+                .max().getAsInt();
+    }
+
     private List<Future<SearchData>> submitTaskToCreateSearchData(
             ExecutorService executor,
-            Map<PageEntity, List<IndexEntity>> pageAndIndexesMapOnQueryLemmas,
+            Map<PageEntity, List<IndexEntity>> pageEntitiesAndIndexEntitiesOnQueryLemmas,
             int maxAbsoluteRelevance) {
 
         List<Future<SearchData>> futureList = new ArrayList<>();
 
-        pageAndIndexesMapOnQueryLemmas.forEach(
+        pageEntitiesAndIndexEntitiesOnQueryLemmas.forEach(
                 (pageEntityOnQuery, indexEntityListOnQuery) -> {
                     Future<SearchData> future =
                             executor.submit(() ->
@@ -236,9 +269,7 @@ public class StatisticsServiceImpl implements StatisticsService {
                                                  int maxAbsoluteRelevance) {
 
         Document htmlCode = Jsoup.parse(pageEntityOnQuery.getContent());
-
         SearchData searchData = new SearchData();
-
         searchData.setSite(pageEntityOnQuery.getSiteEntity().getUrl());
         searchData.setSiteName(pageEntityOnQuery.getSiteEntity().getName());
         searchData.setUri(pageEntityOnQuery.getPath());
@@ -262,23 +293,29 @@ public class StatisticsServiceImpl implements StatisticsService {
         Map<String, List<String>> matchingLemmasOfWordsInHtmlAndQuery = lemmaFinder.
                 collectLemmasEntity(lemmaFinder.
                         htmlCodeToTextWhitRussianWords(htmlCode)).stream().
-                filter(lemmaEntityOfWordOfHtmlText -> lemmasOnQuery.
-                        contains(lemmaEntityOfWordOfHtmlText.getLemma())).
+                filter(lemmaEntityOfHtmlTextWord -> lemmasOnQuery.
+                        contains(lemmaEntityOfHtmlTextWord.getLemma().
+                                replaceAll("Ё", "Е").
+                                replaceAll("ё", "е"))).
                 collect(Collectors.groupingBy(LemmaEntity::getLemma,
                         Collectors.mapping(LemmaEntity::getWord, Collectors.toList())));
 
         return getPartsOfHtmlTextWithQueryWords(htmlCode.text(),
-                matchingLemmasOfWordsInHtmlAndQuery);
+                matchingLemmasOfWordsInHtmlAndQuery,
+                lemmasOnQuery);
     }
 
     private String getPartsOfHtmlTextWithQueryWords(
             String htmlText,
-            Map<String, List<String>> matchingLemmasOfWordsInHtmlAndQuery) {
+            Map<String, List<String>> matchingLemmasOfWordsInHtmlAndQuery,
+            List<String> lemmasOnQuery) {
 
         List<String> distinctWordsAccordingToQueryLemmas =
+                matchingLemmasOfWordsInHtmlAndQuery.isEmpty() ?
+                lemmasOnQuery :
                 matchingLemmasOfWordsInHtmlAndQuery.values().stream().
-                        flatMap(Collection::stream).
-                        distinct().collect(Collectors.toList());
+                        flatMap(wordList -> wordList.stream().distinct()).
+                        collect(Collectors.toList());
 
         int lengthAllIdenticalWords =
                 distinctWordsAccordingToQueryLemmas.stream().
@@ -286,21 +323,21 @@ public class StatisticsServiceImpl implements StatisticsService {
 
         int lengthSubstring =
                 (lengthLine * countLine - lengthAllIdenticalWords) /
-                distinctWordsAccordingToQueryLemmas.size();
+                        distinctWordsAccordingToQueryLemmas.size();
 
         String regex = "[^А-яЁё]";
-        String partsOfHtmlText = getPartsOfHtmlTextWithQueryWords(htmlText,
+        String partsOfHtmlText = copyPartsOfHtmlTextWithQueryWords(htmlText,
                 distinctWordsAccordingToQueryLemmas, lengthSubstring, regex);
 
         StringBuilder builder = new StringBuilder(partsOfHtmlText);
         for (String word : distinctWordsAccordingToQueryLemmas) {
-            builder = multiPerformTagBSelection(builder, word, regex);
+            multiPerformTagBSelection(builder, word, regex);
         }
 
         return builder.toString();
     }
 
-    private String getPartsOfHtmlTextWithQueryWords(
+    private String copyPartsOfHtmlTextWithQueryWords(
             String htmlText,
             List<String> distinctWordsAccordingToQueryLemmas,
             int lengthSubstring, String regex) {
@@ -322,22 +359,22 @@ public class StatisticsServiceImpl implements StatisticsService {
                         (indexDown > 0 && indexUp < text.length())) {
 
                     startIndex = text.charAt(indexDown) == ' ' ?
-                            startIndex : indexDown;
+                            indexDown : startIndex;
                     endIndex = text.charAt(indexUp) == ' ' ?
-                            endIndex : indexUp;
+                            indexUp : endIndex;
                     indexDown--;
                     indexUp++;
                 }
 
                 builder.append(" ... ".
-                        concat(text.substring(startIndex, endIndex)).
+                        concat(text.substring(startIndex, endIndex + 1)).
                         concat(" ... "));
             }
         }
         return builder.toString();
     }
 
-    private StringBuilder multiPerformTagBSelection(
+    private void multiPerformTagBSelection(
             StringBuilder builder, String word, String regex) {
 
         String text = builder.toString();
@@ -352,7 +389,6 @@ public class StatisticsServiceImpl implements StatisticsService {
                     concat(word).concat("</b>").concat(charEnd));
         }
         matcher.appendTail(builder);
-        return builder;
     }
 
 }

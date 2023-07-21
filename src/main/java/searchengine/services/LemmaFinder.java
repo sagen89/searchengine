@@ -24,7 +24,7 @@ public class LemmaFinder {
     }
 
     protected HashMap<String, Integer> collectLemmas(String text) {
-        List<String> words = textToListByWords(text);
+        List<String> words = splittingTextByWords(text);
         HashMap<String, Integer> mapOfLemmasAndFrequencies = new HashMap<>(words.size());
 
         for (String word : words) {
@@ -41,7 +41,7 @@ public class LemmaFinder {
     }
 
     protected List<LemmaEntity> collectLemmasEntity(String text) {
-        List<String> words = textToListByWords(text);
+        List<String> words = splittingTextByWords(text);
 
         List<LemmaEntity> lemmaEntities = new ArrayList<>(words.size());
 
@@ -61,7 +61,7 @@ public class LemmaFinder {
 
 
     protected List<String> getUniqueWords(String text) {
-        List<String> words = textToListByWords(text.toLowerCase());
+        List<String> words = splittingTextByWords(text.toLowerCase());
         return words.stream().filter(word ->{
             List<String> wordBaseForms = luceneMorphology.getMorphInfo(word);
             return !word.isEmpty() && isCorrectWordForm(word)
@@ -108,7 +108,7 @@ public class LemmaFinder {
         return false;
     }
 
-    private List<String> textToListByWords(String text) {
+    private List<String> splittingTextByWords(String text) {
         return Arrays.stream(text.trim().split("\\s+")).filter(word ->
                     word.length() > 2).toList();
     }

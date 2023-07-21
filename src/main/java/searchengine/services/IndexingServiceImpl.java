@@ -6,6 +6,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.Marker;
 import org.apache.logging.log4j.MarkerManager;
+import org.hibernate.Session;
+
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
 import searchengine.config.Site;
@@ -17,6 +19,7 @@ import searchengine.exceptions.IndexPageIsNotPossible;
 import searchengine.exceptions.StartIndexingIsNotPossible;
 import searchengine.exceptions.StopIndexingIsNotPossible;
 
+import searchengine.model.PageEntity;
 import searchengine.model.SiteEntity;
 import searchengine.model.StatusType;
 import searchengine.repositories.SiteDAO;
@@ -25,41 +28,39 @@ import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 public class IndexingServiceImpl implements IndexingService{
 
-    private final Logger logger = LogManager.
-            getLogger(IndexingService.class);
-    private final Marker historyMarker = MarkerManager.
-            getMarker("history");
+    private final Logger logger = LogManager.getLogger(IndexingService.class);
+    private final Marker historyMarker = MarkerManager.getMarker("history");
+
     private final SitesList sites;
     private final SiteDAO siteDAO;
     private final ApplicationContext context;
 
     private ForkJoinPool pool;
     private ExecutorService executorService;
-    private boolean indexingStopped;
 
     @Override
     public StartIndexingResponse startIndexing() {
-        logger.info(historyMarker,
-                "запуск полной индексации: {}",
+        logger.info(historyMarker, "запуск полной индексации: {}",
                 sites);
 
         if (indexingStarted()) {
             logger.info(historyMarker,
                     "запуск полной индексации во время" +
-                            " индексации {}",
-                    sites);
+                            " индексации {}", sites);
             throw new StartIndexingIsNotPossible("Индексация уже запущена");
         }
 
-        createForkJoinPool();
-        sites.getSites().forEach(this::startIndexingPagesSite);
+        createExecutorService(sites.getSites().size() + 1);
+        executorService.execute(runPathSearchingAndIndexing());
 
         StartIndexingResponse indexingResponse = new StartIndexingResponse();
         indexingResponse.setResult(true);
@@ -69,15 +70,14 @@ public class IndexingServiceImpl implements IndexingService{
     @Override
     public StopIndexingResponse stopIndexing() {
         logger.info(historyMarker,
-                "запуск полной остановки индексации: {}",
-                sites);
+                "запуск полной остановки индексации: {}", sites);
 
-        if (!siteDAO.containsByStatus(StatusType.INDEXING) &&
-                indexingStopped) {
+        if (!indexingStarted()) {
             logger.info(historyMarker,
                     "остановка полной индексации при" +
                             " незапущенной индексации");
-            throw new StopIndexingIsNotPossible("Индексация не запущена");
+            throw new StopIndexingIsNotPossible("Индексация не запущена или" +
+                    " начата подготовка к переиндексации");
         }
 
         shutdownForkJoinPool();
@@ -89,6 +89,8 @@ public class IndexingServiceImpl implements IndexingService{
 
     @Override
     public IndexPageResponse indexPage(String indexURL) {
+        logger.info(historyMarker,"запуск индексации страницы: {}",
+                indexURL);
 
         if (indexingStarted()) {
             logger.info(historyMarker,
@@ -97,130 +99,171 @@ public class IndexingServiceImpl implements IndexingService{
             throw new StartIndexingIsNotPossible("Индексация уже запущена");
         }
 
-        logger.info(historyMarker,"запуск индексации страницы: {}",
-                indexURL);
-        
-        HashMap<String, String> homeAndPathURL =
-                splitIndexUrl(indexURL.trim());
+        HashMap<String, String> homeAndPathURL = splitIndexUrl(indexURL.trim());
 
-        Site foundSite = findSiteEntity(homeAndPathURL);
+        Site foundSite = findSite(homeAndPathURL);
+        SiteEntity foundSiteEntity = siteDAO.findSiteByUrl(foundSite.getUrl());
 
-        SiteEntity siteEntity = saveOrUpdateSiteInDataBase(foundSite,
-                StatusType.INDEXING);
+        SiteEntity siteEntity = foundSiteEntity == null ?
+                saveSiteInDataBase(foundSite):
+                updateSiteEntity(foundSiteEntity, StatusType.INDEXING, null);
 
+        createExecutorService(1);
         createForkJoinPool();
-        startIndexingPageSite(siteEntity,
-                homeAndPathURL.get(siteEntity.getUrl()));
+        startPathSearchingAndIndexing(siteEntity, homeAndPathURL.get(siteEntity.getUrl()),
+                false);
 
-        return getIndexPageResponse(siteEntity);
+        IndexPageResponse indexPageResponse = new IndexPageResponse();
+        indexPageResponse.setResult(true);
+        return indexPageResponse;
     }
 
     private boolean indexingStarted() {
-        return siteDAO.containsByStatus(StatusType.INDEXING);
+        return pool != null && pool.getRunningThreadCount() != 0;
+    }
+
+    private Runnable runPathSearchingAndIndexing(){
+        return ()-> {
+            deleteSitesEntities();
+            createForkJoinPool();
+            sites.getSites().forEach(site -> {
+                SiteEntity siteEntity = saveSiteInDataBase(site);
+                startPathSearchingAndIndexing(siteEntity, "/", true);
+            });
+        };
     }
 
     private void createForkJoinPool() {
-        if (pool == null || pool.isShutdown()){
+        if (pool == null || pool.isShutdown()) {
             pool = new ForkJoinPool();
         }
     }
 
-    private void startIndexingPagesSite(Site site) {
-        SiteEntity foundSiteEntity = siteDAO.
-                findSiteByUrl(site.getUrl());
+    private void deleteSitesEntities() {
+        Consumer<Session> delete = session ->
+                sites.getSites().forEach(site -> {
+                    SiteEntity foundSiteEntity = siteDAO.
+                            findSiteByUrl(site.getUrl());
+                    if (foundSiteEntity != null) {
+                        siteDAO.delete(session, foundSiteEntity);
+                    }
+                });
+        do {
+            try {
+                siteDAO.inSessionWithTransaction(delete);
+            } catch (RuntimeException e) {
+                logger.error("При удалении сайтов {} возникли " +
+                                "ошибки: {}",
+                        sites.getSites().stream().map(site -> site.getUrl()).
+                                collect(Collectors.toList()), e);
+            }
+        } while (siteDAO.containsByStatus(StatusType.INDEXED)
+            || siteDAO.containsByStatus(StatusType.FAILED));
+    }
 
-        if (foundSiteEntity != null) {
-            siteDAO.delete(foundSiteEntity);
-        }
+    private void startPathSearchingAndIndexing(SiteEntity siteEntity, String path,
+                                               boolean indexingOfAllPages) {
 
-        SiteEntity siteEntity = saveOrUpdateSiteInDataBase(site,StatusType.INDEXING);
-
-        PathSearcher pathSearcher = new PathSearcher(siteEntity,"/", context);
+        PathSearcher pathSearcher = new PathSearcher(siteEntity,path, context);
+        pathSearcher.setIndexingOfAllPages(indexingOfAllPages);
         pool.execute(pathSearcher);
 
-        updateSiteAfterIndexing(siteEntity, pathSearcher);
+        updateSiteEntityAfterIndexing(siteEntity, pathSearcher);
     }
 
-    private SiteEntity saveOrUpdateSiteInDataBase(Site site, StatusType status) {
+    private SiteEntity saveSiteInDataBase(Site site) {
         SiteEntity siteEntity = new SiteEntity();
-
         siteEntity.setName(site.getName());
         siteEntity.setUrl(site.getUrl());
-        siteEntity.setStatus(status);
+        siteEntity.setStatus(StatusType.INDEXING);
         siteEntity.setStatusTime(new Date());
-
-        siteDAO.saveOrUpdate(siteEntity);
-        return  siteEntity;
+        return siteDAO.save(siteEntity);
     }
 
-    private void updateSiteAfterIndexing(SiteEntity siteEntity,
-                                         PathSearcher pathSearcher) {
-        createExecutorService();
+    private void updateSiteEntityAfterIndexing(SiteEntity siteEntity,
+                                               PathSearcher pathSearcher) {
+
         executorService.execute(() -> {
-            do {
-                try {
-                    Thread.sleep(2000);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-            } while (!pathSearcher.isDone() && !pool.isTerminated());
+            waitForEndOfIndexing(pathSearcher);
             if (pool.isShutdown()) {
                 updateSiteEntity(siteEntity, StatusType.FAILED,
-                        "Индексация остановлена пользователем");
+                        StatisticsServiceImpl.ERRORS[2]);
                 logger.info(historyMarker,
                         "индексация {} остановлена пользователем",
                         siteEntity.getUrl());
-            }
-            if (!pool.isShutdown() && (pathSearcher.getException() != null ||
-                    siteEntity.getLastError() != null)) {
-                String error = pathSearcher.getException() != null ?
-                        pathSearcher.getException().getMessage().
-                                concat(siteEntity.getLastError().isEmpty() ?
-                                        "" : "; ").
-                                concat(siteEntity.getLastError()) :
-                        siteEntity.getLastError();
-                updateSiteEntity(siteEntity, StatusType.FAILED, error);
-                logger.info(historyMarker,
-                        "при индексации {} возникли ошибки: {}",
-                        siteEntity.getUrl(), siteEntity.getLastError());
-            }
-            if (!pool.isShutdown() && pathSearcher.getException() == null &&
-            siteEntity.getLastError() == null) {
-                updateSiteEntity(siteEntity, StatusType.INDEXED, null);
-                logger.info(historyMarker,
-                        "индексация {} заврешена",
+            } else {
+                String lastError = getErrorText(siteEntity);
+                updateSiteEntity(siteEntity,
+                        lastError == null ? StatusType.INDEXED : StatusType.FAILED,
+                        lastError);
+                logger.info(historyMarker, "индексация {} заврешена",
                         siteEntity.getUrl().
                                 concat(!pathSearcher.getIndexingOfAllPages() ?
                                         pathSearcher.getPath() : ""));
             }
-            if (!siteDAO.containsByStatus(StatusType.INDEXING)) {
-                shutdownForkJoinPool();
-                executorService.shutdown();
-            }
+            shutdownIfIndexingIsOver();
         });
     }
 
-    private void createExecutorService() {
+    private void createExecutorService(int nThreads) {
         if (executorService == null || executorService.isShutdown()){
             executorService = Executors.
-                    newFixedThreadPool(sites.getSites().size());
+                    newFixedThreadPool(nThreads);
         }
     }
 
-    private void updateSiteEntity(SiteEntity siteEntity, StatusType status,
+    private void waitForEndOfIndexing(PathSearcher pathSearcher) {
+        do {
+            if (pathSearcher.getIndexingOfAllPages()) {
+                try {
+                    Thread.sleep(20000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        } while (!pathSearcher.isDone() && !pool.isTerminated());
+    }
+
+    private String getErrorText(SiteEntity siteEntity) {
+        Session session = siteDAO.getSession();
+        Set<PageEntity> pageEntities = siteDAO.findById(session, siteEntity).
+                getPageEntitySet();
+        Set<String> pathsWithErrors = pageEntities.stream().
+                filter(pageEntity -> pageEntity.getCode() >= 400).
+                map(PageEntity::getPath).
+                collect(Collectors.toSet());
+        session.close();
+        if (pathsWithErrors.isEmpty()) {
+            return null;
+        }
+        return pageEntities.size() == 1 && pathsWithErrors.contains("/") ?
+                StatisticsServiceImpl.ERRORS[0] :
+                StatisticsServiceImpl.ERRORS[1].
+                        concat(" на страниц").
+                        concat(pathsWithErrors.size() == 1 ? "е " : "ах ").
+                        concat(pathsWithErrors.toString().
+                                replaceAll("\\[?]?", ""));
+    }
+
+    private SiteEntity updateSiteEntity(SiteEntity siteEntity, StatusType status,
                                   String lastError) {
         siteEntity.setLastError(lastError);
         siteEntity.setStatus(status);
         siteEntity.setStatusTime(new Date());
-        siteDAO.saveOrUpdate(siteEntity);
+        return siteDAO.update(siteEntity);
+    }
+
+    private void shutdownIfIndexingIsOver() {
+        if (!siteDAO.containsByStatus(StatusType.INDEXING)) {
+            shutdownForkJoinPool();
+            executorService.shutdown();
+        }
     }
 
     private void shutdownForkJoinPool() {
-        indexingStopped = false;
         do {
             pool.shutdownNow();
-        } while (siteDAO.containsByStatus(StatusType.INDEXING));
-        indexingStopped = true;
+        } while (indexingStarted());
     }
 
     private HashMap<String, String> splitIndexUrl(String indexURL) {
@@ -239,7 +282,7 @@ public class IndexingServiceImpl implements IndexingService{
                 (path.isEmpty() ? "/" : path));}};
     }
 
-    private Site findSiteEntity(HashMap<String, String> homeAndPathURL) {
+    private Site findSite(HashMap<String, String> homeAndPathURL) {
         Site foundSite;
         try {
             foundSite = sites.getSites().stream().
@@ -257,28 +300,6 @@ public class IndexingServiceImpl implements IndexingService{
                     "пределами сайтов, указанных в конфигурационном файле");
         }
         return foundSite;
-    }
-
-    private void startIndexingPageSite(SiteEntity site, String path) {
-        PathSearcher pathSearcher = new PathSearcher(site, path, context);
-        pathSearcher.setIndexingOfAllPages(false);
-        pool.execute(pathSearcher);
-        updateSiteAfterIndexing(site, pathSearcher);
-    }
-
-    private IndexPageResponse getIndexPageResponse(SiteEntity siteEntity) {
-        do {
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-            }
-        } while ((((SiteEntity)siteDAO.findOneById(siteEntity.getId())).getStatus()
-                == StatusType.INDEXING));
-
-        IndexPageResponse indexPageResponse = new IndexPageResponse();
-        indexPageResponse.setResult(siteEntity.getLastError() == null);
-        return indexPageResponse;
     }
 
 }

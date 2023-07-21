@@ -32,7 +32,7 @@ public class PageEntity{
     @Column(columnDefinition = "MEDIUMTEXT not null")
     private String content;
 
-    @OneToMany(cascade = CascadeType.REMOVE, fetch = FetchType.LAZY, mappedBy = "pageEntity")
+    @OneToMany(cascade = {CascadeType.REMOVE}, fetch = FetchType.LAZY, mappedBy = "pageEntity")
     private Set<IndexEntity> indexEntitySet;
 
     @Override

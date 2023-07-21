@@ -3,14 +3,9 @@ package searchengine.repositories;
 import jakarta.persistence.EntityManagerFactory;
 import jakarta.persistence.FlushModeType;
 import lombok.Setter;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.apache.logging.log4j.Marker;
-import org.apache.logging.log4j.MarkerManager;
 import org.hibernate.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Repository;
-import searchengine.services.IndexingService;
 
 import java.util.*;
 import java.util.function.Consumer;
@@ -23,11 +18,6 @@ public abstract class AbstractHibernateDao<T> {
     @Autowired
     @Setter
     private EntityManagerFactory entityManagerFactory;
-
-    private final Logger logger = LogManager.
-            getLogger(IndexingService.class);
-    private final Marker historyMarker = MarkerManager.
-            getMarker("history");
 
 
     public void settClass(Class<T> tClass) {
@@ -46,23 +36,18 @@ public abstract class AbstractHibernateDao<T> {
         }
     }
 
-    public void inSessionWithTransaction(Consumer<Session> action) {
+    public void inSessionWithTransaction(Consumer<Session> action){
         inSession(
                 session -> {
                     Transaction tx = session.getTransaction();
                     try {
                         tx.begin();
-
                         action.accept(session);
-
                         tx.commit();
                     } catch (HibernateException hex) {
                         if (tx != null) {
                             tx.rollback();
                         } else {
-                            logger.info(historyMarker,
-                                    "при транзакции возникал оибка: {}",
-                                    hex.getMessage());
                             throw new RuntimeException(hex);
                         }
                     } finally {
@@ -86,9 +71,7 @@ public abstract class AbstractHibernateDao<T> {
                     Transaction tx = session.getTransaction();
                     try {
                         tx.begin();
-
                         result = action.apply( session );
-
                         tx.commit();
                     } catch (HibernateException hex) {
                         if (tx != null) {
@@ -111,9 +94,8 @@ public abstract class AbstractHibernateDao<T> {
     }
 
 
-    public T findOneById(int id){
-        Function<Session, T> find = session -> session.get(tClass, id);
-        return fromSession(find);
+    public T findOneById(Session session, int id) {
+        return session.get(tClass, id);
     }
 
     protected List<T> findByParameter(Session session, String field,
@@ -133,9 +115,9 @@ public abstract class AbstractHibernateDao<T> {
     public T findOneByTwoParameters(Session session, String field1, T parameter1,
                                     String field2, T parameter2){
 
-        List result = findByTwoParameters(session, field1, parameter1,
+        List<T> result = findByTwoParameters(session, field1, parameter1,
                 field2, parameter2, 1);
-        return result.size() == 0 ? null : (T) result.get(0);
+        return result.size() == 0 ? null : result.get(0);
     }
 
     protected List<T> findByTwoParameters(Session session, String field1, T parameter1,
@@ -152,22 +134,9 @@ public abstract class AbstractHibernateDao<T> {
         return result.size() == 0 ? new ArrayList<>(){{add(null);}} : result;
     }
 
-    public void delete(T entity){
-        Consumer<Session> delete = session -> delete(session, entity);
-        inSessionWithTransaction(delete);
-    }
-
-
     public void delete(Session session,T entity){
         session.remove(session.merge(entity));
     }
-
-    protected void deleteByParameter(Session session, String field, T parameter){
-        session.createQuery("delete from " +  tClass.getSimpleName() +
-                        " where " +  field + " = :parameter")
-                .setParameter("parameter", parameter).executeUpdate();
-    }
-
 }
 
 

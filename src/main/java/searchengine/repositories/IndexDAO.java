@@ -6,6 +6,7 @@ import searchengine.model.IndexEntity;
 import searchengine.model.PageEntity;
 
 import java.util.List;
+import java.util.function.Consumer;
 
 @Repository
 public class IndexDAO extends AbstractHibernateDao {
@@ -15,8 +16,15 @@ public class IndexDAO extends AbstractHibernateDao {
         settClass(IndexEntity.class);
     }
 
-    public List<IndexEntity> findIndexByPage(Session session,
-                                             PageEntity pageEntity) {
+    public void multiInsert(StringBuilder insertQuery) {
+        Consumer<Session> save = session -> session.createNativeQuery(
+                "Insert into `index`(`rank`, lemma_id, page_id) values "
+                        + insertQuery).executeUpdate();
+        inSessionWithTransaction(save);
+    }
+
+    public List<IndexEntity> findIndexesByPage(Session session,
+                                               PageEntity pageEntity) {
         return findByParameter(session,
                 "pageEntity", pageEntity,Integer.MAX_VALUE);
     }
