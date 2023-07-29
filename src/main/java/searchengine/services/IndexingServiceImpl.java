@@ -46,18 +46,21 @@ public class IndexingServiceImpl implements IndexingService{
 
     private ForkJoinPool pool;
     private ExecutorService executorService;
+    private boolean hasIndexingStarted = false;
 
     @Override
     public StartIndexingResponse startIndexing() {
-        logger.info(historyMarker, "запуск полной индексации: {}",
+        logger.info(historyMarker, "Запуск полной индексации: {}",
                 sites);
 
-        if (indexingStarted()) {
+        if (isPoolRunning()) {
             logger.info(historyMarker,
-                    "запуск полной индексации во время" +
+                    "Запуск полной индексации во время" +
                             " индексации {}", sites);
             throw new StartIndexingIsNotPossible("Индексация уже запущена");
         }
+
+        hasIndexingStarted = true;
 
         createExecutorService(sites.getSites().size() + 1);
         executorService.execute(runPathSearchingAndIndexing());
@@ -70,14 +73,19 @@ public class IndexingServiceImpl implements IndexingService{
     @Override
     public StopIndexingResponse stopIndexing() {
         logger.info(historyMarker,
-                "запуск полной остановки индексации: {}", sites);
+                "Запуск полной остановки индексации: {}", sites);
 
-        if (!indexingStarted()) {
+        if (!isPoolRunning() && hasIndexingStarted) {
             logger.info(historyMarker,
-                    "остановка полной индексации при" +
-                            " незапущенной индексации");
-            throw new StopIndexingIsNotPossible("Индексация не запущена или" +
-                    " начата подготовка к переиндексации");
+                    "Остановка полной индексации при" +
+                            " подготовке к переиндексации");
+            throw new StopIndexingIsNotPossible("Идет подготовка к переиндексации");
+        }
+
+        if (!isPoolRunning()) {
+            logger.info(historyMarker,
+                    "Остановка полной индексации при не запущенной индексации");
+            throw new StopIndexingIsNotPossible("Индексация не запущена");
         }
 
         shutdownForkJoinPool();
@@ -89,12 +97,12 @@ public class IndexingServiceImpl implements IndexingService{
 
     @Override
     public IndexPageResponse indexPage(String indexURL) {
-        logger.info(historyMarker,"запуск индексации страницы: {}",
+        logger.info(historyMarker,"Запуск индексации страницы: {}",
                 indexURL);
 
-        if (indexingStarted()) {
+        if (isPoolRunning()) {
             logger.info(historyMarker,
-                    "запуск индексации страницы {} во время индексации",
+                    "Запуск индексации страницы {} во время индексации",
                     indexURL);
             throw new StartIndexingIsNotPossible("Индексация уже запущена");
         }
@@ -118,7 +126,7 @@ public class IndexingServiceImpl implements IndexingService{
         return indexPageResponse;
     }
 
-    private boolean indexingStarted() {
+    private boolean isPoolRunning() {
         return pool != null && pool.getRunningThreadCount() != 0;
     }
 
@@ -257,13 +265,14 @@ public class IndexingServiceImpl implements IndexingService{
         if (!siteDAO.containsByStatus(StatusType.INDEXING)) {
             shutdownForkJoinPool();
             executorService.shutdown();
+            hasIndexingStarted = false;
         }
     }
 
     private void shutdownForkJoinPool() {
         do {
             pool.shutdownNow();
-        } while (indexingStarted());
+        } while (isPoolRunning());
     }
 
     private HashMap<String, String> splitIndexUrl(String indexURL) {

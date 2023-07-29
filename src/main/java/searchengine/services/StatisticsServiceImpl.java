@@ -53,7 +53,7 @@ public class StatisticsServiceImpl implements StatisticsService {
     @Override
     public StatisticsResponse getStatistics() {
 
-        logger.info(historyMarker, "запрос на получение статистики");
+        logger.info(historyMarker, "Запрос на получение статистики");
 
         Session session = siteDAO.getSession();
         List<SiteEntity> siteEntities = siteDAO.getEntities(session);
@@ -77,7 +77,7 @@ public class StatisticsServiceImpl implements StatisticsService {
             String query, Integer offset, Integer limit, String site) {
 
         logger.info(historyMarker,
-                "запрос на получение данных по поисковому запросу \"{}".
+                "Запрос на получение данных по поисковому запросу \"{}".
                         concat(StringUtils.isEmpty(site) ?
                                 "\"" : "\" на сайте {}"),
                 query, site);
@@ -93,7 +93,7 @@ public class StatisticsServiceImpl implements StatisticsService {
         List<LemmaEntity> lemmaEntitiesOnQuery =
                 getLemmaEntities(query, site, session);
         Map<PageEntity, List<IndexEntity>> pageEntitiesAndIndexEntitiesOnQueryLemmas =
-                getPageAndIndexes(lemmaEntitiesOnQuery);
+                getPageEntitiesAndIndexEntities(lemmaEntitiesOnQuery);
         List<SearchData> searchDataList =
                 getSearchData(pageEntitiesAndIndexEntitiesOnQueryLemmas, site, session);
         session.close();
@@ -153,7 +153,7 @@ public class StatisticsServiceImpl implements StatisticsService {
                 sorted().collect(Collectors.toList());
     }
 
-    private Map<PageEntity, List<IndexEntity>> getPageAndIndexes(
+    private Map<PageEntity, List<IndexEntity>> getPageEntitiesAndIndexEntities(
             List<LemmaEntity> lemmaEntities) {
 
         Map<PageEntity, List<IndexEntity>> map = new HashMap<>();
@@ -164,7 +164,7 @@ public class StatisticsServiceImpl implements StatisticsService {
         int amountDistinctLemmas = (int) lemmaEntities.stream().
                 map(LemmaEntity::getLemma).distinct().count();
 
-        lemmaEntities.stream().
+        lemmaEntities.parallelStream().
                 flatMap(lemmaEntity -> lemmaEntity.getIndexEntities().stream()).
                 collect(Collectors.groupingBy(IndexEntity::getPageEntity)).
                 forEach((pageEntity, indexEntities) -> {
